@@ -27,9 +27,24 @@ object TestDocx {
         "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"$cxEmu\" cy=\"$cyEmu\"/>" +
             "<a:graphic><a:graphicData><a:blip r:embed=\"$rid\"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
 
+    fun anchorImage(rid: String, wPt: Int, hPt: Int, behind: Boolean, hRel: String, hOffEmu: Long, vRel: String, vAlign: String, wrap: String = "wrapNone") =
+        "<w:p><w:r><w:drawing><wp:anchor behindDoc=\"${if (behind) 1 else 0}\">" +
+            "<wp:positionH relativeFrom=\"$hRel\"><wp:posOffset>$hOffEmu</wp:posOffset></wp:positionH>" +
+            "<wp:positionV relativeFrom=\"$vRel\"><wp:align>$vAlign</wp:align></wp:positionV>" +
+            "<wp:extent cx=\"${wPt * 12700L}\" cy=\"${hPt * 12700L}\"/><wp:$wrap/>" +
+            "<a:graphic><a:graphicData><a:blip r:embed=\"$rid\"/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"
+
+    val THEME = """<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>
+        <a:clrScheme name="t"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+        <a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+        <a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2></a:clrScheme>
+        <a:fontScheme name="f"><a:majorFont><a:latin typeface="Cambria"/><a:cs typeface=""/></a:majorFont>
+        <a:minorFont><a:latin typeface="Calibri"/><a:cs typeface=""/><a:font script="Beng" typeface="Vrinda"/></a:minorFont></a:fontScheme>
+        </a:themeElements></a:theme>"""
+
     fun build(
         dir: File, body: String, styles: String? = null, numbering: String? = null,
-        media: Map<String, ByteArray> = emptyMap(), name: String = "t.docx"
+        media: Map<String, ByteArray> = emptyMap(), name: String = "t.docx", theme: String? = null
     ): File {
         val f = File(dir, name)
         ZipOutputStream(f.outputStream()).use { z ->
@@ -41,13 +56,14 @@ object TestDocx {
             put("word/document.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document $NS><w:body>$body</w:body></w:document>".toByteArray(Charsets.UTF_8))
             if (styles != null) put("word/styles.xml", "<w:styles $NS>$styles</w:styles>".toByteArray(Charsets.UTF_8))
             if (numbering != null) put("word/numbering.xml", "<w:numbering $NS>$numbering</w:numbering>".toByteArray(Charsets.UTF_8))
+            if (theme != null) put("word/theme/theme1.xml", theme.toByteArray(Charsets.UTF_8))
             for ((k, v) in media) put("word/media/$k", v)
         }
         return f
     }
 
-    fun parse(dir: File, body: String, styles: String? = null, numbering: String? = null, media: Map<String, ByteArray> = emptyMap()): Doc {
-        val f = build(dir, body, styles, numbering, media)
+    fun parse(dir: File, body: String, styles: String? = null, numbering: String? = null, media: Map<String, ByteArray> = emptyMap(), theme: String? = null): Doc {
+        val f = build(dir, body, styles, numbering, media, theme = theme)
         return DocxParser(f, File(dir, "media")).parse()
     }
 

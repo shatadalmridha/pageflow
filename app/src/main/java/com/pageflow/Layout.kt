@@ -13,6 +13,7 @@ import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.style.LeadingMarginSpan
+import android.text.style.LineHeightSpan
 import android.text.style.MetricAffectingSpan
 import android.text.style.TabStopSpan
 import android.util.LruCache
@@ -33,25 +34,34 @@ interface TextLayout {
     fun lineBottom(i: Int): Int
     fun lineStart(i: Int): Int
     fun lineEnd(i: Int): Int
+    fun lineVisibleEnd(i: Int): Int
+    fun lineLeft(i: Int): Float
+    fun lineRight(i: Int): Float
+    fun lineForY(y: Int): Int
+    fun offsetAt(line: Int, x: Float): Int
+    fun cursorX(offset: Int): Float
     fun draw(c: Canvas)
 }
 
 interface TextEngine {
-    fun build(p: ParaBlock, width: Int, cfg: LayoutCfg): TextLayout
+    /** [bg] is the colour behind the paragraph (cell or paragraph shading) so automatic text colour stays legible. */
+    fun build(p: ParaBlock, width: Int, cfg: LayoutCfg, bg: Int? = null): TextLayout
 }
 
 class LayoutCfg(
-    val fontScale: Float, val lineSpacing: Float, val ink: Int,
+    val fontScale: Float, val lineSpacing: Float, val ink: Int, val page: Int,
     val overrideFonts: Boolean, val reading: String?
 )
 
 sealed class Item
-class TextItem(val layout: TextLayout, val x: Float, val y: Float, val l0: Int, val l1: Int) : Item()
-class RectItem(val x: Float, val y: Float, val w: Float, val h: Float, val fill: Int?, val stroke: Boolean) : Item()
+class TextItem(val layout: TextLayout, val x: Float, val y: Float, val l0: Int, val l1: Int, val paraId: Int = -1) : Item()
+class RectItem(val x: Float, val y: Float, val w: Float, val h: Float, val fill: Int?, val borders: Borders? = null) : Item()
 class ImgItem(val file: File, val x: Float, val y: Float, val w: Float, val h: Float) : Item()
 
 class Page(val w: Float, val h: Float, val footerY: Float) {
-    val items = ArrayList<Item>()
+    val back = ArrayList<Item>()      // drawn first: paragraph shading, images behind text
+    val items = ArrayList<Item>()     // flow content in reading order (selection indexes into this list)
+    val front = ArrayList<Item>()     // drawn last: images in front of text
     val text: String by lazy {
         items.filterIsInstance<TextItem>().joinToString("\n") {
             it.layout.text.subSequence(it.layout.lineStart(it.l0), it.layout.lineEnd(it.l1 - 1)).toString()
@@ -79,25 +89,28 @@ fun segments(s: String): List<Pair<String, Boolean>> {
     return out
 }
 
-fun lum(c: Int): Float =
-    (0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)) / 255f
-
-fun adaptColor(c: Int?, ink: Int): Int {
-    if (c == null) return ink
-    val dark = lum(ink) > 0.5f
-    if (dark && lum(c) < 0.35f) return ink
-    if (!dark && lum(c) > 0.85f) return ink
-    return c
+/**
+ * Colour policy: the document's own colours are kept. Only "automatic" text takes the theme's text colour,
+ * and an explicit colour is replaced only when it would be nearly invisible (contrast < 2) on its background.
+ * On shaded areas, automatic text becomes black or white, whichever reads better.
+ */
+fun resolveTextColor(c: Int?, bg: Int?, ink: Int, page: Int): Int {
+    val back = bg ?: page
+    val fallback = if (bg != null) bestOn(bg) else ink
+    if (c == null) return fallback
+    return if (contrast(c, back) < 2.0f) fallback else c
 }
 
 // ------------------------------------------------------------ Android engine
 class RunSpan(
     private val tf: Typeface, private val size: Float, private val color: Int,
-    private val ul: Boolean, private val strike: Boolean, private val vert: Int, private val bg: Int?
+    private val ul: Boolean, private val strike: Boolean, private val vert: Int, private val bg: Int?,
+    private val letterSpacingEm: Float
 ) : MetricAffectingSpan() {
     private fun applyTo(p: TextPaint) {
         p.typeface = tf
         p.textSize = if (vert != 0) size * 0.65f else size
+        if (letterSpacingEm != 0f) p.letterSpacing = letterSpacingEm
         if (vert > 0) p.baselineShift += (p.ascent() / 2f).toInt()
         if (vert < 0) p.baselineShift -= (p.ascent() / 2f).toInt()
     }
@@ -111,6 +124,21 @@ class RunSpan(
     }
 }
 
+/** Word "exact" / "at least" line spacing. */
+class FixedLineHeight(private val heightPx: Int, private val atLeast: Boolean) : LineHeightSpan {
+    override fun chooseHeight(text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt) {
+        val origin = fm.descent - fm.ascent
+        if (origin <= 0) return
+        val target = if (atLeast) maxOf(origin, heightPx) else heightPx
+        if (target == origin) return
+        val ratio = target.toFloat() / origin
+        fm.descent = Math.round(fm.descent * ratio)
+        fm.ascent = fm.descent - target
+        fm.top = fm.ascent
+        fm.bottom = fm.descent
+    }
+}
+
 class AndroidTextLayout(private val l: StaticLayout) : TextLayout {
     override val lineCount: Int get() = l.lineCount
     override val height: Int get() = l.height
@@ -120,27 +148,38 @@ class AndroidTextLayout(private val l: StaticLayout) : TextLayout {
     override fun lineBottom(i: Int) = l.getLineBottom(i)
     override fun lineStart(i: Int) = l.getLineStart(i)
     override fun lineEnd(i: Int) = l.getLineEnd(i)
+    override fun lineVisibleEnd(i: Int) = l.getLineVisibleEnd(i)
+    override fun lineLeft(i: Int) = l.getLineLeft(i)
+    override fun lineRight(i: Int) = l.getLineRight(i)
+    override fun lineForY(y: Int) = l.getLineForVertical(y)
+    override fun offsetAt(line: Int, x: Float) = l.getOffsetForHorizontal(line, x)
+    override fun cursorX(offset: Int) = l.getPrimaryHorizontal(offset)
     override fun draw(c: Canvas) = l.draw(c)
 }
 
 class AndroidTextEngine(private val fonts: FontResolver) : TextEngine {
-    override fun build(p: ParaBlock, width: Int, cfg: LayoutCfg): TextLayout {
+    override fun build(p: ParaBlock, width: Int, cfg: LayoutCfg, bg: Int?): TextLayout {
         val sb = SpannableStringBuilder()
         val scale = S * cfg.fontScale
 
         fun add(text: String, f: Fmt) {
             if (text.isEmpty()) return
+            val runBg = f.highlight ?: f.bgFill ?: bg
             for ((seg0, bn) in segments(text)) {
-                val seg = if (f.caps && !bn) seg0.uppercase() else seg0
+                // length-preserving upper-casing so character offsets (selection, highlights) stay stable
+                val seg = if (f.caps && !bn) seg0.map { it.uppercaseChar() }.joinToString("") else seg0
                 // Word keeps separate size/bold/italic for complex scripts (Bengali): szCs, bCs, iCs.
                 val bold = if (bn) (f.boldCs ?: f.bold) else f.bold
                 val italic = if (bn) (f.italicCs ?: f.italic) else f.italic
                 val hp = if (bn) (f.sizeCsHp ?: f.sizeHp) else f.sizeHp
                 val tf = fonts.resolve(if (bn) (f.fontCs ?: f.font) else f.font, bold, italic, bn, cfg.overrideFonts, cfg.reading)
+                val sizePx = hp / 2f * scale
+                val ls = if (f.spacing != 0) (f.spacing / 20f) / (hp / 2f) else 0f
                 val st = sb.length
                 sb.append(seg)
                 sb.setSpan(
-                    RunSpan(tf, hp / 2f * scale, adaptColor(f.color, cfg.ink), f.underline, f.strike, f.vert, f.highlight),
+                    RunSpan(tf, sizePx, resolveTextColor(f.color, runBg, cfg.ink, cfg.page), f.underline, f.strike, f.vert,
+                        f.highlight ?: f.bgFill, ls),
                     st, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
                 )
             }
@@ -151,7 +190,9 @@ class AndroidTextEngine(private val fonts: FontResolver) : TextEngine {
         if (sb.isEmpty()) add(" ", Fmt(sizeHp = p.sizeHp, sizeCsHp = p.sizeHp))
 
         val pf = p.pf
-        val left = (((pf.left ?: 0) / 20f) * S).toInt().coerceIn(0, (width * 0.7f).toInt())
+        val rightPx = (pf.right / 20f * S).toInt().coerceIn(0, (width * 0.5f).toInt())
+        val w = (width - rightPx).coerceAtLeast(40)
+        val left = (((pf.left ?: 0) / 20f) * S).toInt().coerceIn(0, (w * 0.7f).toInt())
         val firstPx = (left + (pf.first / 20f) * S).toInt().coerceAtLeast(0)
         sb.setSpan(LeadingMarginSpan.Standard(firstPx, left), 0, sb.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
 
@@ -159,14 +200,21 @@ class AndroidTextEngine(private val fonts: FontResolver) : TextEngine {
         val stops = ArrayList<Int>()
         if (p.bullet != null) stops.add(left)
         var x = (36f * S).toInt()
-        while (x < width && stops.size < 40) { if (x > left) stops.add(x); x += (36f * S).toInt() }
+        while (x < w && stops.size < 40) { if (x > left) stops.add(x); x += (36f * S).toInt() }
         for (s in stops) sb.setSpan(TabStopSpan.Standard(s), 0, sb.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
 
         val defPt = p.sizeHp / 2f
-        val mult = when (pf.lineRule) {
-            "exact", "atLeast" -> ((pf.line / 20f) / (defPt * 1.2f)).coerceIn(0.8f, 3f)
-            else -> pf.line / 240f
-        } * cfg.lineSpacing
+        var mult = 1f
+        when (pf.lineRule) {
+            "exact" -> sb.setSpan(FixedLineHeight((pf.line / 20f * S * cfg.fontScale * cfg.lineSpacing).toInt().coerceAtLeast(4), false),
+                0, sb.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+            "atLeast" -> {
+                sb.setSpan(FixedLineHeight((pf.line / 20f * S * cfg.fontScale).toInt().coerceAtLeast(4), true),
+                    0, sb.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+                mult = cfg.lineSpacing
+            }
+            else -> mult = pf.line / 240f * cfg.lineSpacing
+        }
 
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = defPt * scale; color = cfg.ink }
         val al = when (pf.jc) {
@@ -174,7 +222,7 @@ class AndroidTextEngine(private val fonts: FontResolver) : TextEngine {
             "right", "end" -> Layout.Alignment.ALIGN_OPPOSITE
             else -> Layout.Alignment.ALIGN_NORMAL
         }
-        val bld = StaticLayout.Builder.obtain(sb, 0, sb.length, paint, width.coerceAtLeast(40))
+        val bld = StaticLayout.Builder.obtain(sb, 0, sb.length, paint, w)
             .setAlignment(al)
             .setIncludePad(false)
             .setLineSpacing(0f, mult.coerceIn(0.5f, 4f))
@@ -189,10 +237,10 @@ class AndroidTextEngine(private val fonts: FontResolver) : TextEngine {
 
 // ------------------------------------------------------------ pagination
 private sealed class CellPart {
-    class T(val lay: TextLayout, val before: Float, val after: Float) : CellPart()
+    class T(val lay: TextLayout, val before: Float, val after: Float, val pid: Int) : CellPart()
     class I(val img: ImgSpec, val w: Float, val h: Float) : CellPart()
 }
-private class CellL(val x: Float, val w: Float, val fill: Int?, val parts: List<CellPart>)
+private class CellL(val x: Float, val w: Float, val fill: Int?, val borders: Borders?, val vAlign: String, val parts: List<CellPart>, val contentH: Float)
 
 class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val engine: TextEngine) {
     private val pages = ArrayList<Page>()
@@ -207,7 +255,6 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
     private var published = 0
     private var progress: ((List<Page>) -> Unit)? = null
     private var cancelled: () -> Boolean = { false }
-    private val darkInk = lum(cfg.ink) > 0.5f
 
     private fun setGeometry(s: Section) {
         pw = s.pageW * S; ph = s.pageH * S
@@ -254,7 +301,7 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
             }
             prev = sec
         }
-        while (pages.size > 1 && pages[pages.size - 1].items.isEmpty()) pages.removeAt(pages.size - 1)
+        while (pages.size > 1 && pages[pages.size - 1].let { it.items.isEmpty() && it.back.isEmpty() && it.front.isEmpty() }) pages.removeAt(pages.size - 1)
         if (pages.isEmpty()) { setGeometry(Section(emptyList(), 595.3f, 841.9f, 72f, 72f, 72f, 72f)); newPage(false) }
         return pages
     }
@@ -262,8 +309,9 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
     private fun para(p: ParaBlock, next: Block?) {
         if (p.pf.pbb && cur.items.isNotEmpty()) newPage(false)
         val hasText = p.runs.any { it.text.isNotBlank() } || p.bullet != null || p.images.isEmpty()
+        var paraTop = y
         if (hasText) {
-            val lay = engine.build(p, contentW.toInt(), cfg)
+            val lay = engine.build(p, contentW.toInt(), cfg, p.pf.shd)
             val before = p.pf.before / 20f * S
             val after = p.pf.after / 20f * S
             val prev = prevPara
@@ -272,11 +320,12 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
             fun gap(): Float = if (ctxSame) 0f else if (cur.items.isEmpty() && suppressBefore) 0f else before
             var g = gap()
             if (p.pf.keepNext && next is ParaBlock && cur.items.isNotEmpty()) {
-                val nl = engine.build(next, contentW.toInt(), cfg)
+                val nl = engine.build(next, contentW.toInt(), cfg, next.pf.shd)
                 val nh = nl.lineBottom(minOf(1, nl.lineCount - 1)) - nl.lineTop(0)
                 if (y + g + lay.height + after + next.pf.before / 20f * S + nh > bottom) { newPage(true); g = gap() }
             }
             y += g
+            paraTop = y
 
             var line = 0
             val n = lay.lineCount
@@ -296,8 +345,10 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
                 if (end <= line) {
                     if (cur.items.isNotEmpty()) { newPage(true); continue } else end = line + 1
                 }
-                cur.items.add(TextItem(lay, ml, y, line, end))
-                y += (lay.lineBottom(end - 1) - base).toFloat()
+                val h = (lay.lineBottom(end - 1) - base).toFloat()
+                decorate(p, line == 0, end >= n, y, h)
+                cur.items.add(TextItem(lay, ml, y, line, end, p.id))
+                y += h
                 line = end
                 if (line < n) newPage(true)
             }
@@ -305,17 +356,55 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
             lastAfter = after
             prevPara = p
         } else prevPara = null
-        for (img in p.images) { image(img, p.pf.jc); lastAfter = 0f }
+        for (img in p.images) {
+            val an = img.anchor
+            if (an != null && an.wrap == "none") absoluteImage(img, an, paraTop) else image(img, p.pf.jc, an)
+            lastAfter = 0f
+        }
     }
 
-    private fun image(i: ImgSpec, jc: String?) {
+    /** Paragraph shading and borders, drawn behind the text. */
+    private fun decorate(p: ParaBlock, first: Boolean, last: Boolean, yy: Float, h: Float) {
+        val b = p.pf.bdr
+        if (p.pf.shd == null && (b == null || !b.any())) return
+        val l = ml + maxOf(0f, ((p.pf.left ?: 0) + minOf(0, p.pf.first)) / 20f * S)
+        val r = ml + contentW - p.pf.right / 20f * S
+        val borders = b?.let { Borders(if (first) it.top else null, it.left, if (last) it.bottom else null, it.right) }
+        cur.back.add(RectItem(l, yy, (r - l).coerceAtLeast(1f), h, p.pf.shd, borders))
+    }
+
+    private fun absoluteImage(i: ImgSpec, a: ImgAnchor, paraY: Float) {
+        val w = i.wPt * S; val h = i.hPt * S
+        val pageRelX = a.hRel == "page"
+        val baseX = if (pageRelX) 0f else ml
+        val spanW = if (pageRelX) pw else contentW
+        val x = baseX + when (a.hAlign) {
+            "center" -> (spanW - w) / 2f
+            "right", "outside" -> spanW - w
+            "left", "inside" -> 0f
+            else -> a.hOffPt * S
+        }
+        val baseY = when (a.vRel) { "page" -> 0f; "margin", "topMargin" -> top; else -> paraY }
+        val spanH = if (a.vRel == "page") ph else (bottom - top)
+        val yy = baseY + when (a.vAlign) {
+            "center" -> (spanH - h) / 2f
+            "bottom" -> spanH - h
+            "top" -> 0f
+            else -> a.vOffPt * S
+        }
+        val it = ImgItem(i.file, x, yy, w, h)
+        if (a.behind) cur.back.add(it) else cur.front.add(it)
+    }
+
+    private fun image(i: ImgSpec, jc: String?, a: ImgAnchor?) {
         var w = i.wPt * S
         var h = i.hPt * S
         if (w > contentW) { h *= contentW / w; w = contentW }
         val maxH = bottom - top
         if (h > maxH) { w *= maxH / h; h = maxH }
         if (y + h > bottom && cur.items.isNotEmpty()) newPage(true)
-        val x = when (jc) {
+        val align = a?.hAlign ?: jc
+        val x = when (align) {
             "center" -> ml + (contentW - w) / 2f
             "right", "end" -> ml + contentW - w
             else -> ml
@@ -333,7 +422,8 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
         var cols = t.colW.map { it / 20f * S }
         var sum = cols.sum()
         if (sum <= 0f) { val n = t.colW.size.coerceAtLeast(1); cols = List(n) { avail / n }; sum = avail }
-        if (sum > avail) { val k = avail / sum; cols = cols.map { it * k } }
+        if (sum > avail) { val k = avail / sum; cols = cols.map { it * k }; sum = avail }
+        val x0 = ml + indent + when (t.jc) { "center" -> (avail - sum) / 2f; "right", "end" -> avail - sum; else -> 0f }
         val pageH = bottom - top
 
         for (row in t.rows) {
@@ -341,22 +431,21 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
             var ci = 0
             var rowH = row.minHTwips / 20f * S
             val cl = ArrayList<CellL>()
-            val heights = ArrayList<Float>()
             for (cell in row.cells) {
                 val last = (ci + cell.span).coerceAtMost(cols.size)
                 var w = 0f
                 for (k in ci until last) w += cols[k]
-                var x = ml + indent
+                var x = x0
                 for (k in 0 until ci.coerceAtMost(cols.size)) x += cols[k]
                 val inner = (w - padL - padR).toInt().coerceAtLeast(20)
                 val parts = ArrayList<CellPart>()
-                var h = 2 * padY
-                for (p in cell.paras) {
+                var h = 0f
+                if (cell.vMerge != 2) for (p in cell.paras) {
                     if (p.runs.any { it.text.isNotBlank() } || p.bullet != null || p.images.isEmpty()) {
-                        val lay = engine.build(p, inner, cfg)
+                        val lay = engine.build(p, inner, cfg, cell.fill ?: p.pf.shd)
                         val bf = p.pf.before / 20f * S
                         val af = p.pf.after / 20f * S
-                        parts.add(CellPart.T(lay, bf, af))
+                        parts.add(CellPart.T(lay, bf, af, p.id))
                         h += bf + lay.height + af
                     }
                     for (im in p.images) {
@@ -366,21 +455,24 @@ class Paginator(private val doc: Doc, private val cfg: LayoutCfg, private val en
                     }
                 }
                 if (parts.isEmpty()) h += 12 * S
-                cl.add(CellL(x, w, if (darkInk) null else cell.fill, parts))
-                heights.add(h)
-                rowH = maxOf(rowH, h)
+                cl.add(CellL(x, w, cell.fill, cell.borders, cell.vAlign, parts, h))
+                rowH = maxOf(rowH, h + 2 * padY)
                 ci += cell.span
             }
             rowH = rowH.coerceAtMost(pageH)   // a row taller than a page is clipped (rows are not split)
             if (y + rowH > bottom && cur.items.isNotEmpty()) newPage(true)
             for (c in cl) {
                 if (c.w <= 0f) continue
-                if (c.fill != null || t.borders) cur.items.add(RectItem(c.x, y, c.w, rowH, c.fill, t.borders))
-                var yy = y + padY
+                if (c.fill != null || (c.borders != null && c.borders.any())) cur.items.add(RectItem(c.x, y, c.w, rowH, c.fill, c.borders))
+                var yy = y + padY + when (c.vAlign) {
+                    "center" -> ((rowH - 2 * padY - c.contentH) / 2f).coerceAtLeast(0f)
+                    "bottom" -> (rowH - 2 * padY - c.contentH).coerceAtLeast(0f)
+                    else -> 0f
+                }
                 for (part in c.parts) when (part) {
                     is CellPart.T -> {
                         yy += part.before
-                        cur.items.add(TextItem(part.lay, c.x + padL, yy, 0, part.lay.lineCount))
+                        cur.items.add(TextItem(part.lay, c.x + padL, yy, 0, part.lay.lineCount, part.pid))
                         yy += part.lay.height + part.after
                     }
                     is CellPart.I -> {
@@ -421,15 +513,23 @@ object PageDrawer {
         }
     }
 
-    /** Draws a page in layout units. [scale] is the canvas scale already applied by the caller. */
-    fun draw(c: Canvas, page: Page, ink: Int, scale: Float) {
-        for (item in page.items) when (item) {
+    private fun side(c: Canvas, b: Border?, x1: Float, y1: Float, x2: Float, y2: Float, ink: Int) {
+        if (b == null || !b.visible) return
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1f, b.szEighth / 8f * S)
+        p.color = b.color ?: ink
+        c.drawLine(x1, y1, x2, y2, p)
+    }
+
+    private fun drawItem(c: Canvas, item: Item, ink: Int, scale: Float) {
+        when (item) {
             is RectItem -> {
                 if (item.fill != null) { p.style = Paint.Style.FILL; p.color = item.fill; c.drawRect(item.x, item.y, item.x + item.w, item.y + item.h, p) }
-                if (item.stroke) {
-                    p.style = Paint.Style.STROKE; p.strokeWidth = 1f
-                    p.color = (ink and 0x00FFFFFF) or 0x99000000.toInt()
-                    c.drawRect(item.x, item.y, item.x + item.w, item.y + item.h, p)
+                val b = item.borders
+                if (b != null) {
+                    val r = item.x + item.w; val bt = item.y + item.h
+                    side(c, b.top, item.x, item.y, r, item.y, ink); side(c, b.bottom, item.x, bt, r, bt, ink)
+                    side(c, b.left, item.x, item.y, item.x, bt, ink); side(c, b.right, r, item.y, r, bt, ink)
                 }
             }
             is TextItem -> {
@@ -450,5 +550,13 @@ object PageDrawer {
                 c.drawBitmap(it, null, RectF(item.x, item.y, item.x + item.w, item.y + item.h), p)
             }
         }
+    }
+
+    /** Draws a page in layout units. [scale] is the total canvas scale (used to pick image resolution). */
+    fun draw(c: Canvas, page: Page, ink: Int, scale: Float, overlay: ((Canvas) -> Unit)? = null) {
+        for (i in page.back) drawItem(c, i, ink, scale)
+        for (i in page.items) drawItem(c, i, ink, scale)
+        overlay?.invoke(c)
+        for (i in page.front) drawItem(c, i, ink, scale)
     }
 }

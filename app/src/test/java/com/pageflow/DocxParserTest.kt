@@ -78,13 +78,17 @@ class DocxParserTest {
     }
 
     @Test fun tableGridSpanAndShadingAreParsed() {
+        val styles = """<w:style w:type="table" w:styleId="TableGrid"><w:tblPr><w:tblBorders>
+            <w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/>
+            <w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>
+            </w:tblBorders></w:tblPr></w:style>"""
         val tbl = """<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/></w:tblPr>
             <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
             <w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/><w:shd w:fill="FFFF00"/></w:tcPr>${p(run("Merged"))}</w:tc></w:tr>
             <w:tr><w:tc>${p(run("ক"))}</w:tc><w:tc>${p(run("B"))}</w:tc></w:tr></w:tbl>"""
-        val d = TestDocx.parse(tmp.root, tbl + TestDocx.sect())
+        val d = TestDocx.parse(tmp.root, tbl + TestDocx.sect(), styles = styles)
         val t = d.sections[0].blocks.filterIsInstance<TableBlock>().single()
-        assertTrue(t.borders)
+        assertTrue(t.rows[1].cells[0].borders!!.any())
         assertEquals(listOf(3000, 3000), t.colW)
         assertEquals(2, t.rows.size)
         assertEquals(2, t.rows[0].cells[0].span)

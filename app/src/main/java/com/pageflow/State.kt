@@ -132,21 +132,6 @@ class FontResolver(ctx: Context) {
     }
 }
 
-class Pal(val paper: Int, val ink: Int, val dark: Boolean)
-
-fun palette(theme: String, sysDark: Boolean): Pal {
-    val light = Pal(0xFFFFFFFF.toInt(), 0xFF1A1A1A.toInt(), false)
-    val dark = Pal(0xFF262626.toInt(), 0xFFE4E4E4.toInt(), true)
-    return when (theme) {
-        "light" -> light
-        "dark" -> dark
-        "sepia" -> Pal(0xFFF4ECD8.toInt(), 0xFF5B4636.toInt(), false)
-        "cream" -> Pal(0xFFFFF8E7.toInt(), 0xFF333333.toInt(), false)
-        "black" -> Pal(0xFF000000.toInt(), 0xFFD0D0D0.toInt(), true)
-        else -> if (sysDark) dark else light
-    }
-}
-
 class Recent(val uri: String, val name: String, val type: String)
 
 class AppState(val ctx: Context) {
@@ -154,7 +139,12 @@ class AppState(val ctx: Context) {
     val fonts = FontResolver(ctx)
     private val importedDir = File(ctx.filesDir, "imported").apply { mkdirs() }
 
-    var theme by mutableStateOf(sp.getString("theme", "system") ?: "system")
+    var themeId by mutableStateOf(sp.getString("themeId", "oldlace") ?: "oldlace")
+    var custom by mutableStateOf<ReaderTheme?>(loadCustom())
+    val theme: ReaderTheme get() = Themes.find(themeId, custom)
+    var docContinuous by mutableStateOf(sp.getBoolean("docCont", false))
+    var pdfContinuous by mutableStateOf(sp.getBoolean("pdfCont", false))
+    val dict = DictDb(ctx)
     var readingFont by mutableStateOf<String?>(sp.getString("font", null))
     var overrideFonts by mutableStateOf(sp.getBoolean("override", false))
     var fontScale by mutableFloatStateOf(sp.getFloat("fs", 1f))
@@ -171,8 +161,36 @@ class AppState(val ctx: Context) {
         if (readingFont != null && fonts.list.none { it.name == readingFont }) readingFont = null
     }
 
+    private fun loadCustom(): ReaderTheme? {
+        if (!sp.contains("c_page")) return null
+        return ReaderTheme(Themes.CUSTOM_ID, "Custom", sp.getInt("c_page", 0), sp.getInt("c_ink", 0), sp.getInt("c_head", 0), sp.getInt("c_foot", 0))
+    }
+
+    fun selectTheme(id: String) { themeId = id; sp.edit().putString("themeId", id).apply() }
+
+    fun saveCustom(t: ReaderTheme) {
+        custom = ReaderTheme(Themes.CUSTOM_ID, "Custom", t.page, t.ink, t.header, t.footer)
+        sp.edit().putInt("c_page", t.page).putInt("c_ink", t.ink).putInt("c_head", t.header).putInt("c_foot", t.footer).apply()
+        selectTheme(Themes.CUSTOM_ID)
+    }
+
+    fun resetTheme() {
+        custom = null
+        sp.edit().remove("c_page").remove("c_ink").remove("c_head").remove("c_foot").apply()
+        selectTheme("oldlace")
+    }
+
+    fun setViewModes(doc: Boolean? = null, pdf: Boolean? = null) {
+        doc?.let { docContinuous = it }; pdf?.let { pdfContinuous = it }
+        sp.edit().putBoolean("docCont", docContinuous).putBoolean("pdfCont", pdfContinuous).apply()
+    }
+
+    /** Highlights live in the app's private folder, keyed by document, never inside the document. */
+    fun highlights(uri: String): HighlightStore =
+        HighlightStore(File(ctx.filesDir, "annotations/" + HlCodec.docKey(uri) + ".tsv"))
+
     fun persist() {
-        sp.edit().putString("theme", theme).putString("font", readingFont)
+        sp.edit().putString("font", readingFont)
             .putBoolean("override", overrideFonts).putFloat("fs", fontScale).putFloat("ls", lineSpacing).apply()
     }
 

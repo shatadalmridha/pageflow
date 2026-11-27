@@ -20,8 +20,8 @@ android {
         applicationId = "com.pageflow.reader"
         minSdk = 26
         targetSdk = 34
-        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 2
-        versionName = "0.2.0"
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 3
+        versionName = "0.3.0"
     }
 
     signingConfigs {
@@ -75,6 +75,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.core:core-ktx:1.13.1")
+    // PDF text + character positions for selection/copy/highlight (Android's PdfRenderer cannot extract text)
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     // Unit tests run on the plain JVM: a real XML pull parser replaces Android's stubbed one.
     testImplementation("junit:junit:4.13.2")

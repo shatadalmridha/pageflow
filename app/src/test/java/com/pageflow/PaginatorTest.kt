@@ -9,20 +9,30 @@ import com.pageflow.TestDocx.p
 import com.pageflow.TestDocx.run
 import java.io.File
 
-/** Deterministic stand-in for StaticLayout: fixed line height, fixed characters per line. */
+/** Deterministic stand-in for StaticLayout: fixed line height, fixed characters per line, 10 units per char. */
 class FakeLayout(override val text: CharSequence, override val width: Int, private val lineH: Int, private val cpl: Int) : TextLayout {
+    private val charW = 10f
     override val lineCount: Int = maxOf(1, (text.length + cpl - 1) / cpl)
     override val height: Int get() = lineCount * lineH
     override fun lineTop(i: Int) = i * lineH
     override fun lineBottom(i: Int) = (i + 1) * lineH
     override fun lineStart(i: Int) = minOf(text.length, i * cpl)
     override fun lineEnd(i: Int) = minOf(text.length, (i + 1) * cpl)
+    override fun lineVisibleEnd(i: Int) = lineEnd(i)
+    override fun lineLeft(i: Int) = 0f
+    override fun lineRight(i: Int) = (lineEnd(i) - lineStart(i)) * charW
+    override fun lineForY(y: Int) = (y / lineH).coerceIn(0, lineCount - 1)
+    override fun offsetAt(line: Int, x: Float) = (lineStart(line) + (x / charW).toInt()).coerceIn(lineStart(line), lineEnd(line))
+    override fun cursorX(offset: Int): Float {
+        val line = (offset / cpl).coerceIn(0, lineCount - 1)
+        return (offset - lineStart(line)) * charW
+    }
     override fun draw(c: Canvas) {}
 }
 
 class FakeEngine(private val lineH: Int = 24, private val cpl: Int = 40) : TextEngine {
     var builds = 0
-    override fun build(p: ParaBlock, width: Int, cfg: LayoutCfg): TextLayout {
+    override fun build(p: ParaBlock, width: Int, cfg: LayoutCfg, bg: Int?): TextLayout {
         builds++
         val t = (p.bullet?.let { "$it " } ?: "") + p.runs.joinToString("") { it.text }
         return FakeLayout(if (t.isEmpty()) " " else t, width, lineH, cpl)
@@ -31,7 +41,7 @@ class FakeEngine(private val lineH: Int = 24, private val cpl: Int = 40) : TextE
 
 class PaginatorTest {
     @get:Rule val tmp = TemporaryFolder()
-    private val cfg = LayoutCfg(1f, 1f, 0xFF000000.toInt(), false, null)
+    private val cfg = LayoutCfg(1f, 1f, 0xFF000000.toInt(), 0xFFFFFFFF.toInt(), false, null)
     // A4 with 72pt margins: content box 72*S .. (841.9-72)*S vertically
     private fun doc(vararg blocks: Block, sec: Section? = null) =
         Doc(listOf(sec ?: Section(blocks.toList(), 595.3f, 841.9f, 72f, 72f, 72f, 72f)))
@@ -187,16 +197,18 @@ class PaginatorTest {
     }
 
     // ---------- tables
-    private fun cell(t: String, span: Int = 1) = CellSpec(span, listOf(para(t)), null)
-    private fun table(rows: Int, cols: Int = 2, borders: Boolean = true) = TableBlock(
+    private val bd = Border(null, 4, "single")
+    private val allSides = Borders(bd, bd, bd, bd)
+    private fun cell(t: String, span: Int = 1) = CellSpec(span, listOf(para(t)), null, 0, allSides)
+    private fun table(rows: Int, cols: Int = 2) = TableBlock(
         List(cols) { 4500 },
-        List(rows) { r -> RowSpec(List(cols) { c -> cell("r${r}c$c") }) }, borders
+        List(rows) { r -> RowSpec(List(cols) { c -> cell("r${r}c$c") }) }
     )
 
     @Test fun smallTableStaysOnOnePageWithBorders() {
         val pg = paginate(doc(table(3)))[0]
         assertEquals(6, pg.items.filterIsInstance<RectItem>().size)
-        assertTrue(pg.items.filterIsInstance<RectItem>().all { it.stroke })
+        assertTrue(pg.items.filterIsInstance<RectItem>().all { it.borders?.any() == true })
         assertEquals(6, textItems(pg).size)
     }
 
@@ -209,25 +221,86 @@ class PaginatorTest {
     }
 
     @Test fun tableColumnsAreScaledDownToContentWidth() {
-        val wide = TableBlock(listOf(20000, 20000), listOf(RowSpec(listOf(cell("a"), cell("b")))), true)
+        val wide = TableBlock(listOf(20000, 20000), listOf(RowSpec(listOf(cell("a"), cell("b")))))
         val rects = paginate(doc(wide))[0].items.filterIsInstance<RectItem>()
         val right = rects.maxOf { it.x + it.w }
         assertTrue(right <= (595.3f - 72f) * S + 0.01f)
     }
 
     @Test fun gridSpanCellCoversBothColumns() {
-        val t = TableBlock(listOf(3000, 3000), listOf(RowSpec(listOf(cell("m", 2)))), true)
+        val t = TableBlock(listOf(3000, 3000), listOf(RowSpec(listOf(cell("m", 2)))))
         val r = paginate(doc(t))[0].items.filterIsInstance<RectItem>().single()
         assertEquals(6000 / 20f * S, r.w, 0.01f)
     }
 
-    @Test fun cellFillIsDroppedOnDarkThemes() {
-        val t = TableBlock(listOf(3000), listOf(RowSpec(listOf(CellSpec(1, listOf(para("a")), 0xFFFFFF00.toInt())))), false)
-        val dark = LayoutCfg(1f, 1f, 0xFFE0E0E0.toInt(), false, null)
-        val none = Paginator(doc(t), dark, FakeEngine()).run()[0].items.filterIsInstance<RectItem>()
-        assertTrue(none.isEmpty())
-        val light = paginate(doc(t))[0].items.filterIsInstance<RectItem>()
-        assertEquals(1, light.size)
+    @Test fun cellFillIsKeptOnEveryTheme() {
+        val t = TableBlock(listOf(3000), listOf(RowSpec(listOf(CellSpec(1, listOf(para("a")), 0xFFFFFF00.toInt())))))
+        val dark = LayoutCfg(1f, 1f, 0xFFE0E0E0.toInt(), 0xFF202020.toInt(), false, null)
+        assertEquals(0xFFFFFF00.toInt(), Paginator(doc(t), dark, FakeEngine()).run()[0].items.filterIsInstance<RectItem>().single().fill)
+        assertEquals(0xFFFFFF00.toInt(), paginate(doc(t))[0].items.filterIsInstance<RectItem>().single().fill)
+    }
+
+    @Test fun cellVerticalAlignmentCentersShortCell() {
+        val tall = CellSpec(1, listOf(para("t".repeat(120))), null, 0, null, "top")
+        val short = CellSpec(1, listOf(para("s")), null, 0, null, "center")
+        val items = textItems(paginate(doc(TableBlock(listOf(3000, 3000), listOf(RowSpec(listOf(tall, short))))))[0])
+        assertEquals(24f, items[1].y - items[0].y, 0.01f)       // (72 - 24) / 2
+    }
+
+    @Test fun tableCanBeCentered() {
+        val t = TableBlock(listOf(3000), listOf(RowSpec(listOf(cell("a")))), jc = "center")
+        val r = paginate(doc(t))[0].items.filterIsInstance<RectItem>().single()
+        val avail = (595.3f - 144f) * S
+        assertEquals(72f * S + (avail - 300f) / 2f, r.x, 0.01f)
+    }
+
+    // ---------- shading, borders, anchored images
+    @Test fun paragraphShadingAndBordersGoBehindText() {
+        val b = Border(0xFFFF0000.toInt(), 8, "single")
+        val pf = PFmt().also { it.shd = 0xFFDDEEFF.toInt(); it.bdr = Borders(b, b, b, b) }
+        val pg = paginate(doc(para("shaded", pf = pf)))[0]
+        val r = pg.back.filterIsInstance<RectItem>().single()
+        assertEquals(0xFFDDEEFF.toInt(), r.fill)
+        assertEquals(72f * S, r.x, 0.01f)
+        assertTrue(r.borders!!.top != null && r.borders!!.bottom != null)
+    }
+
+    @Test fun shadedParagraphSplitAcrossPagesDrawsTopBorderOnlyOnFirstChunk() {
+        val b = Border(null, 4, "single")
+        val pf = PFmt().also { it.shd = 0xFFEEEEEE.toInt(); it.bdr = Borders(b, b, b, b) }
+        val pages = paginate(doc(para("x".repeat(40 * 90), pf = pf)))
+        val first = pages[0].back.filterIsInstance<RectItem>().single()
+        val second = pages[1].back.filterIsInstance<RectItem>().single()
+        assertNotNull(first.borders!!.top); assertNull(first.borders!!.bottom)
+        assertNull(second.borders!!.top); assertNotNull(second.borders!!.bottom)
+    }
+
+    @Test fun behindTextAnchoredImageIsPositionedAbsolutelyAndDoesNotMoveText() {
+        val an = ImgAnchor(true, "none", "page", null, 10f, "page", "top", 0f)
+        val withImg = ParaBlock(listOf(RunSpec("Body", Fmt())), PFmt(), null, listOf(ImgSpec(File(tmp.root, "i.png"), 100f, 50f, an)), 22)
+        val pg = paginate(doc(withImg))[0]
+        val img = pg.back.filterIsInstance<ImgItem>().single()
+        assertEquals(10f * S, img.x, 0.01f)
+        assertEquals(0f, img.y, 0.01f)
+        assertEquals(72f * S, textItems(pg)[0].y, 0.01f)         // text did not move
+        assertTrue(pg.front.isEmpty())
+    }
+
+    @Test fun inFrontAnchoredImageGoesToFrontLayer() {
+        val an = ImgAnchor(false, "none", "margin", "right", 0f, "margin", "bottom", 0f)
+        val p = ParaBlock(emptyList(), PFmt(), null, listOf(ImgSpec(File(tmp.root, "i.png"), 100f, 50f, an)), 22)
+        val pg = paginate(doc(p))[0]
+        val img = pg.front.filterIsInstance<ImgItem>().single()
+        assertEquals(72f * S + (595.3f - 144f) * S - 100f * S, img.x, 0.01f)
+        assertEquals((841.9f - 72f) * S - 50f * S, img.y, 0.01f)
+    }
+
+    @Test fun squareWrapAnchoredImageStaysInFlowNeverOverlappingText() {
+        val an = ImgAnchor(false, "square", "column", "center", 0f, "paragraph", "top", 0f)
+        val p = ParaBlock(emptyList(), PFmt(), null, listOf(ImgSpec(File(tmp.root, "i.png"), 100f, 50f, an)), 22)
+        val pg = paginate(doc(p, para("after")))[0]
+        val img = pg.items.filterIsInstance<ImgItem>().single()
+        assertTrue(textItems(pg)[0].y >= img.y + img.h)
     }
 
     // ---------- sections

@@ -1,7 +1,7 @@
-# PageFlow – Smooth Document Reader (v0.2.0, Milestone 1.5)
+# PageFlow – Smooth Document Reader (v0.3.0)
 
-Offline Android reader for DOCX (page-by-page, Bengali-first) and PDF. No internet permission.
-See **FEATURES.md** for exactly what exists, what is untested, and what is only planned.
+Offline Android **reader** for DOCX (Bengali-first) and PDF. No internet permission; Translate and Wiktionary open outside the app.
+See **FEATURES.md** (what exists, limits), **TESTING.md** (automated vs real-device tests), **CHANGELOG.md**.
 
 ## First build (no Android Studio needed)
 
@@ -37,3 +37,10 @@ Without it, every build is signed with a different temporary key and can't updat
 
 ## Running tests locally (optional)
 `gradle testDebugUnitTest` (Gradle 8.9, JDK 17). CI runs them on every build.
+
+## Updating an existing repository with this version
+1. In your repository open each changed folder/file and upload over it: use *Add file → Upload files* and drop the contents
+   of this ZIP (keep folder structure: `app/`, `.github/`, root files). Same-named files are replaced.
+2. Commit. The build starts by itself. If the new workflow files do not appear under `.github/workflows/`, create them with
+   *Add file → Create new file* and paste the contents.
+3. No new Secrets are needed; your existing signing Secrets keep working.
