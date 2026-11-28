@@ -408,7 +408,7 @@ fun SettingsScreen(app: AppState, onBack: () -> Unit) {
         item { HorizontalDivider(Modifier.padding(vertical = 12.dp)) }
         item {
             Text("About", fontWeight = FontWeight.SemiBold)
-            Text("PageFlow 0.3.0 · a document reader, not an editor. Offline except Google Translate / Wiktionary links. " +
+            Text("PageFlow 0.3.1 · a document reader, not an editor. Offline except Google Translate / Wiktionary links. " +
                 "Documents are read from a temporary copy; your original files are never modified.",
                 fontSize = 13.sp, modifier = Modifier.padding(vertical = 4.dp))
             Text("Reads: DOCX (own renderer: not identical to Word, see FEATURES.md) and PDF. Selection, highlights, themes, dictionary import.",

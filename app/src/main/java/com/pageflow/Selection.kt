@@ -17,7 +17,7 @@ class DocSel(x: Anchor, y: Anchor) {
 }
 
 /** Simple rectangle in page layout units (no Android dependency so it can be unit-tested). */
-class R(val l: Float, val t: Float, val r: Float, val b: Float)
+class Rc(val l: Float, val t: Float, val r: Float, val b: Float)
 
 private fun clusterBoundary(text: CharSequence, off: Int, forward: Boolean): Int {
     if (text.isEmpty()) return 0
@@ -104,9 +104,9 @@ fun paragraphSelection(page: Page, a: Anchor): DocSel? {
 }
 
 /** Rectangles (page layout units) covering [start, end) of one text item. */
-fun itemRects(it: TextItem, start: Int, end: Int): List<R> {
+fun itemRects(it: TextItem, start: Int, end: Int): List<Rc> {
     val l = it.layout
-    val out = ArrayList<R>()
+    val out = ArrayList<Rc>()
     val s = maxOf(start, l.lineStart(it.l0))
     val e = minOf(end, l.lineVisibleEnd(it.l1 - 1))
     if (e <= s) return out
@@ -117,7 +117,7 @@ fun itemRects(it: TextItem, start: Int, end: Int): List<R> {
         if (le <= ls) continue
         val left = if (ls <= l.lineStart(line)) l.lineLeft(line) else l.cursorX(ls)
         val right = if (le >= l.lineVisibleEnd(line)) l.lineRight(line) else l.cursorX(le)
-        if (right > left) out.add(R(it.x + left, it.y + l.lineTop(line) - base, it.x + right, it.y + l.lineBottom(line) - base))
+        if (right > left) out.add(Rc(it.x + left, it.y + l.lineTop(line) - base, it.x + right, it.y + l.lineBottom(line) - base))
     }
     return out
 }
@@ -131,8 +131,8 @@ fun selRangeFor(sel: DocSel, idx: Int, it: TextItem): IntRange? {
     return if (e > s) s until e else null
 }
 
-fun selRects(page: Page, sel: DocSel): List<R> {
-    val out = ArrayList<R>()
+fun selRects(page: Page, sel: DocSel): List<Rc> {
+    val out = ArrayList<Rc>()
     for ((idx, any) in textItems(page)) {
         val it = any as TextItem
         val r = selRangeFor(sel, idx, it) ?: continue

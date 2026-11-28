@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+* **Build fix:** a helper class in `Selection.kt` was named `R`, which clashes with Android's generated resource class
+  `com.pageflow.R`. Renamed to `Rc`. (This is the only compile problem I could identify without the build log.)
+* **Workflow:** when Gradle fails, the Kotlin compiler errors and failed tests are now written to the run's *annotations*
+  and *job summary* (readable without signing in) and the full logs are uploaded as artifact `gradle-logs`.
+
 ## 0.3.0
 **Direction:** reader only. No editing was ever shipped; the editing requirement is removed from the roadmap.
 
