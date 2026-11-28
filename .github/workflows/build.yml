@@ -58,14 +58,39 @@ jobs:
           fi
 
       - name: Unit tests
-        run: gradle testDebugUnitTest --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee gradle-test.log
 
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }} 2>&1 | tee gradle-debug.log
 
       - name: Build release APK (signed; only when a key is configured)
         if: env.HAS_KEYSTORE == 'true'
-        run: gradle assembleRelease --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --stacktrace -PversionCode=${{ github.run_number }} 2>&1 | tee gradle-release.log
+
+      # Make failures readable without signing in: the compiler / test errors become annotations on the run page.
+      - name: Report errors
+        if: failure()
+        run: |
+          for f in gradle-test.log gradle-debug.log gradle-release.log; do
+            [ -f "$f" ] || continue
+            errs=$(grep -E '^e: |error: |FAILED$|AssertionError|What went wrong|Execution failed|Could not (resolve|find)|Unresolved reference' "$f" \
+              | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/##' | cut -c1-300 | awk '!seen[$0]++' | head -25)
+            [ -n "$errs" ] || continue
+            {
+              echo "### Errors from $f"
+              echo '```'
+              echo "$errs"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            enc=$(printf '%s' "$errs" | sed -e 's/%/%25/g' -e 's/\r//g' | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')
+            echo "::error title=Errors in $f::$enc"
+          done
 
       - name: Upload APKs
         uses: actions/upload-artifact@v6
@@ -75,6 +100,14 @@ jobs:
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gradle-logs
+          path: gradle-*.log
+          if-no-files-found: ignore
 
       - name: Upload test reports
         if: always()
